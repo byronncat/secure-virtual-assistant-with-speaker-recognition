@@ -50,13 +50,16 @@ training:
 
 # ---------------- Evaluation ----------------
 evaluation:
-  checkpoint_path: "./checkpoints/best_model.pt"                             # Path to the best model checkpoint
-  trial_list: "./data/manifests/test_trials.csv"                             # Path to the test trials manifest
-  dcf_p_target: 0.01                                                         # Target probability for DCF calculation
-  dcf_c_miss: 1                                                              # Cost for miss in DCF calculation
-  dcf_c_fa: 1                                                                # Cost for false alarm in DCF calculation
-  enrollment_list: "./data/manifests/enrollment.csv"                         # Path to the enrollment manifest
-  identification_test_list: "./data/manifests/identification_test.csv"       # Path to the identification test manifest
-  top_k: [1, 5]                                                              # Top-k values for evaluation           
-  open_set: true                                                             # Whether to use open-set evaluation
-  threshold: null                                                            # Threshold for evaluation
+  checkpoint_path: "./checkpoints/best_model.pt"                                    # Path to the best model checkpoint
+  verification_trial_list: "./data/manifests/verification_trials.csv"               # Path to the closed-set SV trial manifest
+  dcf_p_target: 0.01                                                                # Target probability for DCF calculation
+  dcf_c_miss: 1                                                                     # Cost for miss in DCF calculation
+  dcf_c_fa: 10                                                                      # Cost for false alarm in DCF calculation
+  enrollment_list: "./data/manifests/train.csv"                                     # Reference/enrollment set used to build speaker centroids
+  val_list: "./data/manifests/val.csv"                                              # Used ONLY to auto-derive the open-set rejection threshold
+  identification_test_list: "./data/manifests/open_set_identification_trials.csv"   # KNOWN + UNKNOWN open-set SID queries
+  top_k: [1, 5]                                                                     # Top-k values for evaluation
+  threshold: null                                                                   # Open-set rejection threshold. If null, it is computed
+                                                                                    # automatically from val_list (minDCF-optimal) and then
+                                                                                    # fixed for identification_test_list. NEVER derived from
+                                                                                    # identification_test_list itself.
