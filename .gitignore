@@ -1,3 +1,15 @@
+# Models
+*.wav
+*.pt
+*.csv
+*.tsv
+vietnam-celeb-e.txt
+vietnam-celeb-h.txt
+vietnam-celeb-t.txt
+runs/
+logs/
+checkpoints/
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[codz]

@@ -1,0 +1,62 @@
+# ============================================================
+# ECAPA-TDNN training configuration
+# ============================================================
+seed: 1234
+
+# ---------------- Data ----------------
+data:
+  manifest_dir: "./data/manifests"            # Directory containing the manifest files for training and evaluation
+  sample_rate: 16000                          # (Hz) audio sample rate for feature extraction
+  min_duration: 1.0                           # (seconds) discard utterances shorter than this
+  max_duration: 4.0                           # (seconds) randomly crop during training to keep batch lengths fixed
+
+# ---------------- Feature extraction ----------------
+features:
+  n_mels: 80                                  # Number of mel bins for Mel spectrogram
+  n_fft: 400                                  # FFT window size
+  win_length: 400                             # Window length for STFT
+  hop_length: 160                             # Hop length for STFT
+
+# ---------------- Model architecture ----------------
+model:
+  input_size: 80
+  channels: [512, 512, 512, 512, 1536]         # Number of channels for each layer of the ECAPA-TDNN model
+  kernel_sizes: [5, 3, 3, 3, 1]                # Kernel sizes for each layer of the ECAPA-TDNN model
+  dilations: [1, 2, 3, 4, 1]                   # Dilations for each layer of the ECAPA-TDNN model
+  attention_channels: 128                      # Number of attention channels for the ECAPA-TDNN model
+  lin_neurons: 192                             # Number of neurons for the linear layer of the ECAPA-TDNN model
+
+# ---------------- Loss function ----------------
+loss:
+  type: "aam_softmax"                          # Loss function for the ECAPA-TDNN model
+  margin: 0.2                                  # Margin for the AAM-Softmax loss function
+  scale: 30                                    # Scale for the AAM-Softmax loss function
+
+# ---------------- Training ----------------
+training:
+  batch_size: 32                               # Batch size for training
+  num_epochs: 50                               # Number of epochs for training
+  lr: 0.001                                    # Learning rate for training
+  lr_final: 0.00001                            # Final learning rate for training
+  weight_decay: 0.000002                       # Weight decay for training
+  optimizer: "adam"                            # Optimizer for training
+  scheduler: "exponential"                     # Scheduler for training
+  num_workers: 4                               # Number of workers for training
+  grad_clip: 5.0                               # Gradient clip for training
+  checkpoint_dir: "./checkpoints"              # Directory for checkpointing
+  log: true                                    # Whether to log training progress
+  log_dir: "./logs"                            # Directory for logging
+  early_stopping_patience: 5                   # Early stopping patience for training
+
+# ---------------- Evaluation ----------------
+evaluation:
+  checkpoint_path: "./checkpoints/best_model.pt"                             # Path to the best model checkpoint
+  trial_list: "./data/manifests/test_trials.csv"                             # Path to the test trials manifest
+  dcf_p_target: 0.01                                                         # Target probability for DCF calculation
+  dcf_c_miss: 1                                                              # Cost for miss in DCF calculation
+  dcf_c_fa: 1                                                                # Cost for false alarm in DCF calculation
+  enrollment_list: "./data/manifests/enrollment.csv"                         # Path to the enrollment manifest
+  identification_test_list: "./data/manifests/identification_test.csv"       # Path to the identification test manifest
+  top_k: [1, 5]                                                              # Top-k values for evaluation           
+  open_set: true                                                             # Whether to use open-set evaluation
+  threshold: null                                                            # Threshold for evaluation
