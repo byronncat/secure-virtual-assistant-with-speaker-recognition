@@ -42,6 +42,7 @@ import pandas as pd
 import torch
 import torch.nn.functional as F
 import yaml
+from torch.utils.tensorboard import SummaryWriter
 
 from dataset import SpeakerDataset
 from metrics import compute_eer, compute_min_dcf
@@ -391,9 +392,26 @@ def main():
     LOGGER.info("Startup | config=%s | device=%s", args.config, device)
     LOGGER.info("Loading checkpoint | %s", checkpoint_path)
 
+    # TensorBoard logging, using the same technique as train.py: a single
+    # SummaryWriter, config dumped as run/config text, and metrics written as
+    # scalars under an "evaluation/" namespace.
+    writer = None
+    if evaluation_cfg.get("log", False):
+        log_dir = evaluation_cfg.get("log_dir", "./logs/eval")
+        writer = SummaryWriter(log_dir=log_dir)
+        writer.add_text("run/config", yaml.safe_dump(cfg), 0)
+        LOGGER.info("Logging enabled | TensorBoard event directory: %s", log_dir)
+    else:
+        LOGGER.info(
+            "Logging disabled | Set evaluation.log=true to enable TensorBoard events."
+        )
+
     encoder = build_encoder(cfg["model"]).to(device)
     epoch = load_checkpoint(encoder, checkpoint_path, device)
     LOGGER.info("Model ready | checkpoint_epoch=%s", epoch)
+    # Used as the TensorBoard step for evaluation scalars; falls back to 0
+    # if the checkpoint doesn't record an epoch number.
+    step = epoch if isinstance(epoch, int) else 0
 
     data_cfg = cfg["data"]
     features_cfg = cfg["features"]
@@ -437,6 +455,15 @@ def main():
             sv_results["dcf_threshold"],
             sv_results["normalized_min_dcf"],
         )
+        if writer is not None:
+            writer.add_scalar("evaluation/eer", sv_results["eer"], step)
+            writer.add_scalar("evaluation/min_dcf", sv_results["min_dcf"], step)
+            writer.add_scalar(
+                "evaluation/normalized_min_dcf",
+                sv_results["normalized_min_dcf"],
+                step,
+            )
+            writer.flush()
     else:
         LOGGER.info("Verification evaluation skipped (--skip-verification)")
 
@@ -503,8 +530,19 @@ def main():
                     f"{name}={value * 100:.2f}%" for name, value in sid_results.items()
                 ),
             )
+            if writer is not None:
+                for name, value in sid_results.items():
+                    writer.add_scalar(f"evaluation/{name}", value, step)
+                writer.flush()
     else:
         LOGGER.info("Identification evaluation skipped (--skip-identification)")
+
+    if writer is not None:
+        writer.close()
+        LOGGER.info(
+            "TensorBoard logging completed | %s",
+            evaluation_cfg.get("log_dir", "./logs/eval"),
+        )
 
 
 if __name__ == "__main__":

@@ -10,7 +10,22 @@ Usage:
 import argparse
 import logging
 import os
+import shutil
 import time
+
+# --- Avoid CPU oversubscription with multiple DataLoader workers ----------
+# Each DataLoader worker is a separate process. Libraries used inside
+# dataset.py (torchaudio's resampling/MelSpectrogram, which lean on
+# OpenMP/MKL for their FFTs) default to spawning one thread PER AVAILABLE
+# CORE, per process. With num_workers>1 that means N worker processes each
+# trying to use every core simultaneously, which causes heavy context-
+# switching/cache thrashing and can make training much SLOWER than with
+# fewer workers. Pinning each process's internal thread pool to 1 lets
+# parallelism come from the workers themselves instead. This must run
+# before torch/torchaudio are imported (including transitively, via the
+# `from dataset import ...` below) to reliably take effect.
+os.environ.setdefault("OMP_NUM_THREADS", "1")
+os.environ.setdefault("MKL_NUM_THREADS", "1")
 
 import pandas as pd
 import torch
@@ -23,6 +38,11 @@ from tqdm.auto import tqdm
 from dataset import SpeakerDataset, collate_fn
 from metrics import compute_eer, compute_min_dcf, top_k_accuracy
 from model import build_model_and_loss
+
+# Also cap the main process's own thread pool for the same reason -- it
+# does the val_set verification embedding (single-process) and otherwise
+# would compete with the worker processes for cores too.
+torch.set_num_threads(1)
 
 LOGGER = logging.getLogger("speaker_training")
 
@@ -168,7 +188,12 @@ def main():
         )
 
     manifest_dir = cfg["data"]["manifest_dir"]
-    LOGGER.info("Dataset initialization | manifest_dir=%s", manifest_dir)
+    aug_cfg = cfg.get("augmentation", {})
+    LOGGER.info(
+        "Dataset initialization | manifest_dir=%s | augmentation_enabled=%s",
+        manifest_dir,
+        aug_cfg.get("enabled", False),
+    )
     train_set = SpeakerDataset(
         os.path.join(manifest_dir, "train.csv"),
         sample_rate=cfg["data"]["sample_rate"],
@@ -179,6 +204,13 @@ def main():
         hop_length=cfg["features"]["hop_length"],
         train_mode=True,
         min_duration=cfg["data"]["min_duration"],
+        augment=aug_cfg.get("enabled", False),
+        freq_mask_param=aug_cfg.get("freq_mask_param", 0),
+        time_mask_param=aug_cfg.get("time_mask_param", 0),
+        num_freq_masks=aug_cfg.get("num_freq_masks", 0),
+        num_time_masks=aug_cfg.get("num_time_masks", 0),
+        gain_db_range=tuple(aug_cfg.get("gain_db_range", [0.0, 0.0])),
+        gain_prob=aug_cfg.get("gain_prob", 0.0),
     )
     val_set = SpeakerDataset(
         os.path.join(manifest_dir, "val.csv"),
@@ -191,6 +223,7 @@ def main():
         train_mode=True,  # Keep fixed-length crops for batch loss/accuracy calculation.
         speaker2idx=train_set.speaker2idx,
         min_duration=cfg["data"]["min_duration"],
+        augment=False,  # Never augment validation data.
     )
     LOGGER.info(
         "Datasets ready | train_samples=%d | val_samples=%d | speakers=%d | min_duration=%.2fs",
@@ -200,25 +233,39 @@ def main():
         cfg["data"]["min_duration"],
     )
 
+    num_workers = cfg["training"]["num_workers"]
+    # persistent_workers keeps worker processes alive between epochs instead
+    # of tearing them down and re-spawning (which re-imports torchaudio, etc.
+    # in each one) every single epoch -- only valid when num_workers > 0.
+    # pin_memory speeds up the host->GPU copy, so it's only useful on CUDA.
+    persistent_workers = num_workers > 0
+    pin_memory = device.type == "cuda"
     train_loader = DataLoader(
         train_set,
         batch_size=cfg["training"]["batch_size"],
         shuffle=True,
-        num_workers=cfg["training"]["num_workers"],
+        num_workers=num_workers,
         collate_fn=collate_fn,
         drop_last=True,
+        persistent_workers=persistent_workers,
+        pin_memory=pin_memory,
     )
     val_loader = DataLoader(
         val_set,
         batch_size=cfg["training"]["batch_size"],
         shuffle=False,
-        num_workers=cfg["training"]["num_workers"],
+        num_workers=num_workers,
         collate_fn=collate_fn,
+        persistent_workers=persistent_workers,
+        pin_memory=pin_memory,
     )
     LOGGER.info(
-        "Data loaders ready | batch_size=%d | workers=%d | train_batches=%d | val_batches=%d",
+        "Data loaders ready | batch_size=%d | workers=%d | persistent_workers=%s | "
+        "pin_memory=%s | train_batches=%d | val_batches=%d",
         cfg["training"]["batch_size"],
-        cfg["training"]["num_workers"],
+        num_workers,
+        persistent_workers,
+        pin_memory,
         len(train_loader),
         len(val_loader),
     )
@@ -269,6 +316,10 @@ def main():
     bad_epochs = 0
     history = []
     global_step = 0
+
+    eval_every_n_epochs = cfg["training"].get("eval_every_n_epochs", 0)
+    save_top_k = cfg["training"].get("save_top_k", 1)
+    top_checkpoints = []  # list of (val_loss, path), kept sorted ascending
 
     for epoch in range(1, cfg["training"]["num_epochs"] + 1):
         t0 = time.time()
@@ -325,6 +376,40 @@ def main():
             )
             writer.flush()
 
+        # Periodic verification eval (EER/minDCF). This embeds every trial
+        # utterance and is much more expensive than a training/validation
+        # batch pass, so it only runs every `eval_every_n_epochs` epochs
+        # (<=0 disables it entirely; the model still gets a final verification
+        # eval after the training loop below).
+        if eval_every_n_epochs > 0 and epoch % eval_every_n_epochs == 0:
+            LOGGER.info("Periodic verification eval | epoch=%d", epoch)
+            periodic_metrics = evaluate_verification(
+                encoder,
+                val_set,
+                cfg["evaluation"]["verification_trial_list"],
+                device,
+                cfg["evaluation"],
+            )
+            LOGGER.info(
+                "Epoch %03d verification | EER=%.4f%% | minDCF=%.6f | normalized_minDCF=%.4f",
+                epoch,
+                periodic_metrics["eer"] * 100,
+                periodic_metrics["min_dcf"],
+                periodic_metrics["normalized_min_dcf"],
+            )
+            if writer is not None:
+                writer.add_scalar("epoch/eer", periodic_metrics["eer"], epoch)
+                writer.add_scalar("epoch/min_dcf", periodic_metrics["min_dcf"], epoch)
+                writer.add_scalar(
+                    "epoch/normalized_min_dcf",
+                    periodic_metrics["normalized_min_dcf"],
+                    epoch,
+                )
+                writer.flush()
+            # evaluate_verification() leaves the encoder in eval mode; the next
+            # call to run_epoch() explicitly sets train/eval mode again, so no
+            # manual restore is needed here.
+
         history.append(
             {
                 "epoch": epoch,
@@ -335,21 +420,56 @@ def main():
             }
         )
 
-        if val_loss < best_val_loss:
+        # --- Checkpoint management -------------------------------------
+        # Save every epoch's checkpoint, then prune down to the `save_top_k`
+        # checkpoints with the lowest val_loss (save_top_k<=0 keeps them all).
+        # This bounds disk usage while still keeping a handful of good
+        # checkpoints around (e.g. for ensembling or inspecting overfitting),
+        # rather than only ever keeping a single "best" checkpoint.
+        improved = val_loss < best_val_loss
+        if improved:
             best_val_loss = val_loss
             bad_epochs = 0
-            torch.save(
-                {
-                    "encoder": encoder.state_dict(),
-                    "classifier": classifier.state_dict(),
-                    "speaker2idx": train_set.speaker2idx,
-                    "epoch": epoch,
-                },
-                os.path.join(ckpt_dir, "best_model.pt"),
-            )
-            LOGGER.info("Checkpoint saved | best_model.pt | val_loss=%.4f", val_loss)
         else:
             bad_epochs += 1
+
+        epoch_ckpt_path = os.path.join(
+            ckpt_dir, f"epoch{epoch:03d}_valloss{val_loss:.4f}.pt"
+        )
+        torch.save(
+            {
+                "encoder": encoder.state_dict(),
+                "classifier": classifier.state_dict(),
+                "speaker2idx": train_set.speaker2idx,
+                "epoch": epoch,
+                "val_loss": val_loss,
+            },
+            epoch_ckpt_path,
+        )
+        LOGGER.info(
+            "Checkpoint saved | %s | val_loss=%.4f",
+            os.path.basename(epoch_ckpt_path),
+            val_loss,
+        )
+        top_checkpoints.append((val_loss, epoch_ckpt_path))
+        top_checkpoints.sort(key=lambda item: item[0])
+        if save_top_k > 0:
+            while len(top_checkpoints) > save_top_k:
+                _, stale_path = top_checkpoints.pop()
+                if os.path.exists(stale_path):
+                    os.remove(stale_path)
+                LOGGER.info(
+                    "Checkpoint pruned (outside top-%d by val_loss) | %s",
+                    save_top_k,
+                    os.path.basename(stale_path),
+                )
+
+        if improved:
+            shutil.copyfile(epoch_ckpt_path, os.path.join(ckpt_dir, "best_model.pt"))
+            LOGGER.info(
+                "best_model.pt updated | epoch=%d | val_loss=%.4f", epoch, val_loss
+            )
+        else:
             if bad_epochs >= patience:
                 LOGGER.info(
                     "Early stopping | epoch=%d | val_loss did not improve for %d epochs",
@@ -366,11 +486,15 @@ def main():
     LOGGER.info("Training history saved | %s", os.path.join(ckpt_dir, "history.json"))
 
     LOGGER.info(
-        "Verification evaluation started | trial_list=%s",
-        cfg["evaluation"]["trial_list"],
+        "Verification evaluation started | verification_trial_list=%s",
+        cfg["evaluation"]["verification_trial_list"],
     )
     verification_metrics = evaluate_verification(
-        encoder, val_set, cfg["evaluation"]["trial_list"], device, cfg["evaluation"]
+        encoder,
+        val_set,
+        cfg["evaluation"]["verification_trial_list"],
+        device,
+        cfg["evaluation"],
     )
     LOGGER.info(
         "Verification evaluation completed | EER=%.4f%% | minDCF=%.6f | normalized_minDCF=%.4f",

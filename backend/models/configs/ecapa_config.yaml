@@ -32,6 +32,18 @@ loss:
   margin: 0.2                                  # Margin for the AAM-Softmax loss function
   scale: 30                                    # Scale for the AAM-Softmax loss function
 
+# ---------------- Data augmentation (train split only) ----------------
+augmentation:
+  enabled: true                                # Master switch; false disables everything below
+  # SpecAugment, applied to the log-mel features
+  freq_mask_param: 15                          # Max width (in mel bins) of a frequency mask
+  time_mask_param: 25                          # Max width (in frames) of a time mask
+  num_freq_masks: 2                            # Number of frequency masks applied per utterance
+  num_time_masks: 2                            # Number of time masks applied per utterance
+  # Waveform-level random gain
+  gain_db_range: [-6, 6]                       # Random gain applied to the waveform, in dB
+  gain_prob: 0.3                               # Probability of applying random gain per utterance
+
 # ---------------- Training ----------------
 training:
   batch_size: 32                               # Batch size for training
@@ -44,13 +56,19 @@ training:
   num_workers: 4                               # Number of workers for training
   grad_clip: 5.0                               # Gradient clip for training
   checkpoint_dir: "./checkpoints"              # Directory for checkpointing
+  save_top_k: 3                                # Keep only the k best checkpoints (lowest val_loss). <=0 keeps all.
   log: true                                    # Whether to log training progress
   log_dir: "./logs"                            # Directory for logging
   early_stopping_patience: 5                   # Early stopping patience for training
+  eval_every_n_epochs: 5                       # Run verification EER/minDCF eval every N epochs (<=0 = only after training ends).
+                                                # Verification eval is expensive (embeds every trial utterance), so running
+                                                # it every single epoch is wasteful; every 2-5 epochs is more typical.
 
 # ---------------- Evaluation ----------------
 evaluation:
   checkpoint_path: "./checkpoints/best_model.pt"                                    # Path to the best model checkpoint
+  log: true                                                                         # Whether evaluate.py writes TensorBoard events
+  log_dir: "./logs/eval"                                                            # Directory for evaluate.py's TensorBoard events
   verification_trial_list: "./data/manifests/verification_trials.csv"               # Path to the closed-set SV trial manifest
   dcf_p_target: 0.01                                                                # Target probability for DCF calculation
   dcf_c_miss: 1                                                                     # Cost for miss in DCF calculation
