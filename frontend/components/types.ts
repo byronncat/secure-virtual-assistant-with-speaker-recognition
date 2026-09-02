@@ -2,9 +2,10 @@ import type { LucideIcon } from "lucide-react";
 
 export interface VoiceCommand {
   id: string;
+  intent?: string;
   label: string;
   description: string;
-  icon: LucideIcon;
+  icon: string | LucideIcon;
   important: boolean;
 }
 

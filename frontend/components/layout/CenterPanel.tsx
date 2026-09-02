@@ -132,10 +132,10 @@ function MicButton({ isActive, onStart, onStop }: MicButtonProps) {
       className={clsx(
         "relative size-50 rounded-full",
         "flex items-center justify-center",
-        "transition-colors duration-150 ease-in-out cursor-pointer",
+        "transition-colors ease-in-out cursor-pointer",
         isActive
           ? "bg-primary pulse"
-          : "hover:bg-primary/50 border-2 border-primary bg-primary/60",
+          : "hover:bg-primary/50 border-2 border-primary",
       )}
       onPointerDown={onStart}
       onPointerUp={onStop}

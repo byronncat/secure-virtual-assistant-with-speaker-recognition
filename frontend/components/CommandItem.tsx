@@ -1,12 +1,16 @@
 import type { VoiceCommand } from "./types";
 import clsx from "clsx";
+import { getLucideIcon } from "@/lib/icons";
 
 interface CommandItemProps {
   command: VoiceCommand;
 }
 
 export default function CommandItem({ command }: CommandItemProps) {
-  const Icon = command.icon;
+  const Icon =
+    typeof command.icon === "string"
+      ? getLucideIcon(command.icon)
+      : command.icon;
 
   return (
     <button
@@ -15,7 +19,7 @@ export default function CommandItem({ command }: CommandItemProps) {
         "group",
         "flex w-full items-center gap-3",
         "px-3 py-2.5 text-left",
-        "transition-colors ease-in-out duration-200",
+        "transition-colors ease-in-out",
         "text-muted hover:text-normal hover:bg-white/5 cursor-pointer",
       )}
     >

@@ -87,7 +87,7 @@ export default function LoginForm({ onSwitchToRegister }: LoginFormProps) {
             className={clsx(
               "w-full rounded-xl bg-primary py-2.5",
               "text-[14px] font-medium text-background",
-              "transition-opacity duration-150 hover:opacity-80 cursor-pointer",
+              "transition-opacity hover:opacity-80 cursor-pointer",
               "disabled:cursor-not-allowed disabled:opacity-60",
             )}
           >

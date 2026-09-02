@@ -1,130 +1,193 @@
-import type { WeatherSnapshot } from "./types";
+"use client";
 
+import { useEffect, useRef, useState, type FormEvent } from "react";
 import clsx from "clsx";
-import { Sparkles, Undo2 } from "lucide-react";
-import WeatherCard from "./WeatherCard";
-import MessageActions from "./MessageActions";
+import { AlertTriangle, Send } from "lucide-react";
+import { sendChatMessage, ApiError, type PipelineResult } from "@/lib/api";
 
-const WEATHER: WeatherSnapshot = {
-  location: "Ho Chi Minh City",
-  tempC: 32,
-  feelsLikeC: 36,
-  condition: "Partly cloudy",
-  humidityPct: 62,
-  windKph: 12,
-};
+interface ChatMessage {
+  id: string;
+  role: "user" | "assistant";
+  text: string;
+  rejected?: boolean;
+  command?: string | null;
+}
+
+const LANGUAGE_OPTIONS = [
+  { code: "en", label: "English" },
+  { code: "vi", label: "Tiếng Việt" },
+];
+
+let nextId = 0;
+function newId() {
+  nextId += 1;
+  return `msg_${nextId}`;
+}
 
 export default function RightSidebar() {
+  const [messages, setMessages] = useState<ChatMessage[]>([]);
+  const [input, setInput] = useState("");
+  const [language, setLanguage] = useState("en");
+  const [isStreaming, setIsStreaming] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const scrollRef = useRef<HTMLDivElement | null>(null);
+
+  useEffect(() => {
+    scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight });
+  }, [messages]);
+
+  async function handleSubmit(e: FormEvent) {
+    e.preventDefault();
+    const text = input.trim();
+    if (!text || isStreaming) return;
+
+    setInput("");
+    setError(null);
+    setMessages((prev) => [...prev, { id: newId(), role: "user", text }]);
+
+    const assistantId = newId();
+    setMessages((prev) => [
+      ...prev,
+      { id: assistantId, role: "assistant", text: "" },
+    ]);
+    setIsStreaming(true);
+
+    try {
+      await sendChatMessage(text, language, {
+        onAnswerChunk: (chunk) => {
+          setMessages((prev) =>
+            prev.map((m) =>
+              m.id === assistantId ? { ...m, text: m.text + chunk } : m,
+            ),
+          );
+        },
+        onDone: (result: PipelineResult) => {
+          setMessages((prev) =>
+            prev.map((m) =>
+              m.id === assistantId
+                ? {
+                    ...m,
+                    text: result.answer || m.text,
+                    rejected: result.rejected,
+                    command: result.command,
+                  }
+                : m,
+            ),
+          );
+        },
+      });
+    } catch (err) {
+      setError(
+        err instanceof ApiError
+          ? err.message
+          : "Failed to reach the assistant.",
+      );
+      setMessages((prev) => prev.filter((m) => m.id !== assistantId));
+    } finally {
+      setIsStreaming(false);
+    }
+  }
+
   return (
-    <aside className="size-full p-4 min-h-0">
+    <aside className="flex size-full flex-col p-4">
       <div
         className={clsx(
-          "bg-card size-full",
-          "flex flex-col",
-          "rounded-xl border border-white/12",
+          "flex flex-1 min-h-0 flex-col overflow-hidden",
+          "rounded-xl border border-white/12 bg-card",
         )}
       >
-        <Header />
-        <Conversation />
-        <Composer />
+        <div className="flex items-center justify-between border-b border-white/12 px-4 py-3">
+          <span className="text-[16px] font-medium text-primary">Chat</span>
+          <select
+            aria-label="Response language"
+            value={language}
+            onChange={(e) => setLanguage(e.target.value)}
+            className="rounded-lg border border-white/12 bg-background px-2 py-1 text-[13px] text-normal outline-none"
+          >
+            {LANGUAGE_OPTIONS.map((opt) => (
+              <option key={opt.code} value={opt.code}>
+                {opt.label}
+              </option>
+            ))}
+          </select>
+        </div>
+
+        <div
+          ref={scrollRef}
+          className="flex-1 overflow-y-auto px-4 py-3 flex flex-col gap-3"
+        >
+          {messages.length === 0 && (
+            <p className="text-[13px] text-muted">
+              Type a message below to chat, or use the mic to run voice
+              commands.
+            </p>
+          )}
+          {messages.map((message) => (
+            <MessageBubble key={message.id} message={message} />
+          ))}
+        </div>
+
+        {error && (
+          <p role="alert" className="px-4 pb-2 text-[13px] text-red-400">
+            {error}
+          </p>
+        )}
+
+        <form
+          onSubmit={handleSubmit}
+          className="flex items-center gap-2 border-t border-white/12 p-3"
+        >
+          <input
+            value={input}
+            onChange={(e) => setInput(e.target.value)}
+            placeholder="Type a message..."
+            disabled={isStreaming}
+            className={clsx(
+              "flex-1 rounded-lg border border-white/12 bg-background px-3 py-2",
+              "text-[14px] text-normal outline-none focus:border-primary",
+              "disabled:opacity-60",
+            )}
+          />
+          <button
+            type="submit"
+            aria-label="Send message"
+            disabled={isStreaming || !input.trim()}
+            className={clsx(
+              "flex size-9 items-center justify-center rounded-lg bg-primary text-background",
+              "transition-opacity hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-50",
+            )}
+          >
+            <Send size={16} strokeWidth={1.75} />
+          </button>
+        </form>
       </div>
     </aside>
   );
 }
 
-function Header() {
+function MessageBubble({ message }: { message: ChatMessage }) {
+  const isUser = message.role === "user";
   return (
     <div
       className={clsx(
-        "flex items-center gap-2",
-        "border-b border-white/12",
-        "p-4 text-primary",
+        "flex flex-col gap-1",
+        isUser ? "items-end" : "items-start",
       )}
     >
-      <Sparkles size={18} className="text-accent" strokeWidth={1.75} />
-      <h2 className="text-[15px] font-medium text-ink">
-        Assistant&apos;s Response
-      </h2>
-    </div>
-  );
-}
-
-function Conversation() {
-  return (
-    <div className="flex-1 overflow-y-auto px-6 py-6">
-      <div className={clsx("flex flex-col gap-5", "text-[16px] text-normal")}>
-        <p>Sure! Here&apos;s the current weather in {WEATHER.location}:</p>
-
-        <WeatherCard data={WEATHER} />
-
-        <p>
-          It looks warm with a chance of scattered thunderstorms in the
-          afternoon. Don&apos;t forget to stay hydrated!
-        </p>
-
-        <p>Would you like me to check anything else for you?</p>
-
-        <p>
-          Lorem ipsum dolor sit amet, consectetur adipiscing elit. Mauris tortor
-          tellus, tristique in faucibus non, convallis id turpis. Proin pulvinar
-          blandit tellus sed porta. Vivamus viverra porta posuere. Nunc vehicula
-          vulputate dui, vitae volutpat quam faucibus a. In venenatis arcu
-          lobortis justo pretium, non dictum nibh ultrices. Curabitur ultrices
-          arcu magna, nec efficitur lectus ullamcorper ac. Curabitur quis leo
-          dui. Etiam dui libero, feugiat ut venenatis a, molestie a tellus.
-          Etiam feugiat mauris leo, eu hendrerit leo bibendum vel. Integer eros
-          augue, tristique sit amet interdum eu, convallis vel nunc.
-        </p>
-
-        <p>
-          Lorem ipsum dolor sit amet, consectetur adipiscing elit. Mauris et
-          ornare urna. Nam imperdiet dignissim lorem, sed sodales augue. Integer
-          at blandit nisi, eget interdum erat. Etiam turpis lorem, luctus eu
-          commodo id, aliquet rutrum metus. Fusce at rutrum erat. In nec
-          molestie mi, eu mattis sapien. Curabitur fringilla diam non velit
-          laoreet dictum. Phasellus blandit, nisi sollicitudin sollicitudin
-          molestie, ex lectus consequat tellus, vel dignissim est ipsum sed
-          ipsum.
-        </p>
-
-        <MessageActions />
-      </div>
-    </div>
-  );
-}
-
-function Composer() {
-  return (
-    <div className="border-t border-white/12 p-4">
       <div
         className={clsx(
-          "flex items-center gap-2",
-          "rounded-full border border-white/12 bg-background",
-          "py-1 pl-5 pr-1.5",
+          "max-w-[85%] rounded-xl px-3 py-2 text-[14px]",
+          isUser ? "bg-primary text-background" : "bg-white/8 text-normal",
         )}
       >
-        <input
-          type="text"
-          placeholder="Ask me anything..."
-          className={clsx(
-            "flex-1 bg-transparent py-2.5",
-            "text-[14px] text-normal",
-            "placeholder:text-faint focus:outline-none",
-          )}
-        />
-        <button
-          type="button"
-          aria-label="Send message"
-          className={clsx(
-            "flex size-9 shrink-0 items-center justify-center",
-            "rounded-full",
-            "hover:bg-white/10 text-normal/80 hover:text-normal",
-            "transition-colors ease-in-out duration-200 cursor-pointer",
-          )}
-        >
-          <Undo2 size={17} strokeWidth={2} />
-        </button>
+        {message.text || (message.role === "assistant" ? "..." : "")}
       </div>
+      {message.rejected && (
+        <span className="flex items-center gap-1 text-[12px] text-red-400">
+          <AlertTriangle size={12} strokeWidth={2} />
+          Command &ldquo;{message.command}&rdquo; was rejected
+        </span>
+      )}
     </div>
   );
 }
