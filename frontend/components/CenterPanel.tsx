@@ -1,12 +1,124 @@
 "use client";
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useState } from "react";
 import clsx from "clsx";
 import { Mic } from "lucide-react";
 import ControlBar from "./ControlBar";
+import {
+  useVoiceRecorder,
+  type RecordingStatus,
+} from "@/hooks/useVoiceRecorder";
+
+const VOICE_ENDPOINT = "http://localhost:8000/api/voice";
+
+// Matches the unified response contract from the backend's `done` SSE
+// event (pipeline.py / main.py): {text, language, speaker_id, command,
+// rejected, answer}. `answer` arrives incrementally via `answer_chunk`
+// events before that, so the UI can show it streaming in.
+interface PipelineResult {
+  text: string;
+  language: string | null;
+  speaker_id: string | null;
+  command: string | null;
+  rejected: boolean;
+  answer: string;
+}
+
+/**
+ * Parses one SSE frame of the form:
+ *   event: <type>\n
+ *   data: <json>\n\n
+ * Returns null if the frame doesn't contain a recognizable event.
+ */
+function parseSseFrame(frame: string): { type: string; data: unknown } | null {
+  const eventLine = frame.split("\n").find((l) => l.startsWith("event: "));
+  const dataLine = frame.split("\n").find((l) => l.startsWith("data: "));
+  if (!eventLine || !dataLine) return null;
+  const type = eventLine.slice("event: ".length).trim();
+  try {
+    const data = JSON.parse(dataLine.slice("data: ".length));
+    return { type, data };
+  } catch {
+    return null;
+  }
+}
 
 export default function CenterPanel() {
   const [status, setStatus] = useState<RecordingStatus>("idle");
+  const [streamingAnswer, setStreamingAnswer] = useState("");
+  const [lastResult, setLastResult] = useState<PipelineResult | null>(null);
+
+  const uploadRecording = useCallback(
+    async (pcm: ArrayBuffer, sampleRate: number) => {
+      const formData = new FormData();
+      // Raw 16-bit PCM, little-endian, mono — no container/codec, so the
+      // backend just needs to know the sample rate to resample from.
+      formData.append(
+        "audio",
+        new Blob([pcm], { type: "application/octet-stream" }),
+        "recording.pcm",
+      );
+      formData.append("sample_rate", String(sampleRate));
+      formData.append("channels", "1");
+
+      setStreamingAnswer("");
+      setLastResult(null);
+
+      try {
+        const res = await fetch(VOICE_ENDPOINT, {
+          method: "POST",
+          body: formData,
+        });
+        if (!res.ok || !res.body) {
+          const err = await res.json().catch(() => ({}));
+          throw new Error(err.detail ?? `Upload failed (${res.status})`);
+        }
+
+        // The backend streams Server-Sent Events: a "meta" event as soon
+        // as ASR/correction/intent routing finish, zero or more
+        // "answer_chunk" events (conversation replies only), and a final
+        // "done" event carrying the full unified result.
+        const reader = res.body.getReader();
+        const decoder = new TextDecoder();
+        let buffer = "";
+        let answerSoFar = "";
+
+        while (true) {
+          const { value, done } = await reader.read();
+          if (done) break;
+          buffer += decoder.decode(value, { stream: true });
+
+          let boundary: number;
+          while ((boundary = buffer.indexOf("\n\n")) !== -1) {
+            const frame = buffer.slice(0, boundary);
+            buffer = buffer.slice(boundary + 2);
+
+            const parsed = parseSseFrame(frame);
+            if (!parsed) continue;
+
+            if (parsed.type === "answer_chunk") {
+              const { chunk } = parsed.data as { chunk: string };
+              answerSoFar += chunk;
+              setStreamingAnswer(answerSoFar);
+            } else if (parsed.type === "done") {
+              const result = parsed.data as PipelineResult;
+              setLastResult(result);
+              setStreamingAnswer("");
+            }
+          }
+        }
+      } catch (err) {
+        console.error("Voice upload failed:", err);
+        setStatus("error");
+      }
+    },
+    [],
+  );
+
+  const { isActive, start, stop } = useVoiceRecorder({
+    onStatusChange: setStatus,
+    onRecordingComplete: uploadRecording,
+  });
 
   return (
     <section
@@ -16,13 +128,7 @@ export default function CenterPanel() {
       )}
     >
       <div className="flex flex-1 flex-col items-center justify-center gap-10">
-        <MicButton
-          onStatusChange={setStatus}
-          onRecordingComplete={(blob) => {
-            // Wire this up to your upload / transcription pipeline.
-            console.log("Recording complete:", blob);
-          }}
-        />
+        <MicButton isActive={isActive} onStart={start} onStop={stop} />
 
         <div
           className={clsx(
@@ -32,7 +138,18 @@ export default function CenterPanel() {
           )}
         >
           <h1 className="text-[30px] font-semibold">{statusHeading(status)}</h1>
-          <p className="text-[16px] text-faint">{statusSubtext(status)}</p>
+          <p className="text-[16px] text-faint">
+            {statusSubtext(status, streamingAnswer, lastResult)}
+          </p>
+          {lastResult?.rejected && (
+            <p className="text-[13px] text-red-400">
+              Command &ldquo;{lastResult.command}&rdquo; was rejected
+              {lastResult.speaker_id
+                ? ` (speaker: ${lastResult.speaker_id})`
+                : ""}
+              .
+            </p>
+          )}
         </div>
       </div>
 
@@ -40,8 +157,6 @@ export default function CenterPanel() {
     </section>
   );
 }
-
-type RecordingStatus = "idle" | "requesting" | "recording" | "error";
 
 function statusHeading(status: RecordingStatus) {
   switch (status) {
@@ -56,7 +171,11 @@ function statusHeading(status: RecordingStatus) {
   }
 }
 
-function statusSubtext(status: RecordingStatus) {
+function statusSubtext(
+  status: RecordingStatus,
+  streamingAnswer: string,
+  lastResult: PipelineResult | null,
+) {
   switch (status) {
     case "recording":
       return "I'm listening...";
@@ -65,106 +184,23 @@ function statusSubtext(status: RecordingStatus) {
     case "error":
       return "Check your microphone permissions";
     default:
+      // While a conversation answer is still streaming in, show it live;
+      // once "done" arrives, lastResult.answer is the final text
+      // (identical content, but stable rather than growing).
+      if (streamingAnswer) return streamingAnswer;
+      if (lastResult?.answer) return lastResult.answer;
+      if (lastResult?.text) return lastResult.text;
       return "Press and hold the mic to talk";
   }
 }
 
 interface MicButtonProps {
-  onStatusChange?: (status: RecordingStatus) => void;
-  onRecordingComplete?: (blob: Blob) => void;
+  isActive: boolean;
+  onStart: () => void;
+  onStop: () => void;
 }
 
-function MicButton({ onStatusChange, onRecordingComplete }: MicButtonProps) {
-  const [isActive, setIsActive] = useState(false);
-  const [status, setStatus] = useState<RecordingStatus>("idle");
-
-  const streamRef = useRef<MediaStream | null>(null);
-  const recorderRef = useRef<MediaRecorder | null>(null);
-  const chunksRef = useRef<Blob[]>([]);
-
-  const updateStatus = useCallback(
-    (next: RecordingStatus) => {
-      setStatus(next);
-      onStatusChange?.(next);
-    },
-    [onStatusChange],
-  );
-
-  const stopStream = useCallback(() => {
-    streamRef.current?.getTracks().forEach((track) => track.stop());
-    streamRef.current = null;
-  }, []);
-
-  const startRecording = useCallback(async () => {
-    // Guard against double-starts (e.g. rapid pointer events).
-    if (recorderRef.current && recorderRef.current.state !== "inactive") return;
-
-    updateStatus("requesting");
-
-    try {
-      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-      streamRef.current = stream;
-
-      const mimeType = MediaRecorder.isTypeSupported("audio/webm")
-        ? "audio/webm"
-        : undefined; // let the browser pick a supported default (e.g. Safari)
-
-      const recorder = new MediaRecorder(
-        stream,
-        mimeType ? { mimeType } : undefined,
-      );
-      chunksRef.current = [];
-
-      recorder.ondataavailable = (event) => {
-        if (event.data.size > 0) chunksRef.current.push(event.data);
-      };
-
-      recorder.onstop = () => {
-        const blob = new Blob(chunksRef.current, {
-          type: recorder.mimeType || "audio/webm",
-        });
-        chunksRef.current = [];
-        stopStream();
-        onRecordingComplete?.(blob);
-      };
-
-      recorder.onerror = () => {
-        updateStatus("error");
-        stopStream();
-      };
-
-      recorderRef.current = recorder;
-      recorder.start();
-      setIsActive(true);
-      updateStatus("recording");
-    } catch (err) {
-      console.error("Mic access failed:", err);
-      updateStatus("error");
-      setIsActive(false);
-    }
-  }, [onRecordingComplete, stopStream, updateStatus]);
-
-  const stopRecording = useCallback(() => {
-    setIsActive(false);
-    const recorder = recorderRef.current;
-    if (recorder && recorder.state !== "inactive") {
-      recorder.stop();
-    } else {
-      stopStream();
-    }
-    if (status !== "error") updateStatus("idle");
-  }, [status, stopStream, updateStatus]);
-
-  // Clean up if the component unmounts mid-recording.
-  useEffect(() => {
-    return () => {
-      if (recorderRef.current && recorderRef.current.state !== "inactive") {
-        recorderRef.current.stop();
-      }
-      stopStream();
-    };
-  }, [stopStream]);
-
+function MicButton({ isActive, onStart, onStop }: MicButtonProps) {
   return (
     <button
       type="button"
@@ -176,12 +212,12 @@ function MicButton({ onStatusChange, onRecordingComplete }: MicButtonProps) {
         "transition-colors duration-150 ease-in-out cursor-pointer",
         isActive
           ? "bg-primary pulse"
-          : "hover:bg-primary/50 border-2 border-primary bg-primary/30",
+          : "hover:bg-primary/50 border-2 border-primary bg-primary/60",
       )}
-      onPointerDown={startRecording}
-      onPointerUp={stopRecording}
+      onPointerDown={onStart}
+      onPointerUp={onStop}
       onPointerLeave={() => {
-        if (isActive) stopRecording();
+        if (isActive) onStop();
       }}
     >
       <Mic
