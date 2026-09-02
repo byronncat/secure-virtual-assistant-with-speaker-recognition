@@ -5,7 +5,7 @@ import clsx from "clsx";
 import { AuthProvider, useAuth } from "@/lib/auth-context";
 import { Loader2 } from "lucide-react";
 import LeftSidebar from "@/components/LeftSidebar";
-import CenterPanel from "@/components/CenterPanel";
+import CenterPanel from "@/components/layout/CenterPanel";
 import RightSidebar from "@/components/RightSidebar";
 import LoginForm from "@/components/auth/LoginForm";
 import RegisterForm from "@/components/auth/RegisterForm";
