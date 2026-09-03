@@ -14,6 +14,7 @@ from app.core.config import settings
 
 logger = logging.getLogger("voice_backend")
 logging.basicConfig(level=logging.INFO)
+logger.info("Initializing voice backend on device: %s", settings.DEVICE)
 
 app = FastAPI(title="Voice Backend", version="0.4.0")
 
