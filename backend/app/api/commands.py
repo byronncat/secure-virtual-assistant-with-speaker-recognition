@@ -19,7 +19,10 @@ router = APIRouter(prefix="/api/commands", tags=["Commands"])
 async def list_commands(
     current_user: UserRecord = Depends(get_current_user),
 ) -> list[CommandOut]:
-    return [CommandOut(**vars(c)) for c in command_repository.list_commands()]
+    return [
+        CommandOut(**vars(c))
+        for c in command_repository.list_commands(username=current_user.username)
+    ]
 
 
 @router.post("", response_model=CommandOut, status_code=status.HTTP_201_CREATED)
@@ -28,7 +31,12 @@ async def create_command(
 ) -> CommandOut:
     try:
         created = command_repository.create_command(
-            request.intent, request.description, request.important
+            username=current_user.username,
+            intent=request.intent,
+            label=request.label,
+            icon=request.icon,
+            description=request.description,
+            important=request.important,
         )
     except CommandDbError as exc:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, str(exc)) from exc
@@ -43,7 +51,12 @@ async def update_command(
 ) -> CommandOut:
     try:
         updated = command_repository.update_command(
-            intent, description=request.description, important=request.important
+            username=current_user.username,
+            intent=intent,
+            label=request.label,
+            icon=request.icon,
+            description=request.description,
+            important=request.important,
         )
     except CommandDbError as exc:
         raise HTTPException(status.HTTP_404_NOT_FOUND, str(exc)) from exc
@@ -55,6 +68,6 @@ async def delete_command(
     intent: str, current_user: UserRecord = Depends(get_current_user)
 ) -> None:
     try:
-        command_repository.delete_command(intent)
+        command_repository.delete_command(username=current_user.username, intent=intent)
     except CommandDbError as exc:
         raise HTTPException(status.HTTP_404_NOT_FOUND, str(exc)) from exc
