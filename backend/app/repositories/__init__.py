@@ -16,6 +16,16 @@ from app.repositories.enrollment_repository import (
     load_centroid,
     load_raw_embeddings,
 )
+from app.repositories.memory_repository import (
+    add_memories_batch,
+    add_memory,
+    delete_all_memories,
+    delete_memory,
+    get_memory,
+    list_memories,
+    search_memories,
+    update_memory,
+)
 from app.repositories.user_repository import (
     EnrollmentError,
     UserError,
@@ -44,4 +54,12 @@ __all__ = [
     "compute_and_store_centroid",
     "load_centroid",
     "enrollment_status",
+    "list_memories",
+    "get_memory",
+    "add_memory",
+    "add_memories_batch",
+    "update_memory",
+    "delete_memory",
+    "delete_all_memories",
+    "search_memories",
 ]

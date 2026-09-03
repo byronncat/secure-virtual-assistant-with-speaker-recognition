@@ -17,6 +17,7 @@ from app.services import (
     asr,
     intent_router,
     llm,
+    memory,
     speaker_verification,
     text_correction,
 )
@@ -110,6 +111,13 @@ async def _handle_conversation(
     speaker_id: str | None,
 ) -> AsyncIterator[PipelineEvent]:
     """Conversation branch: stream the LLM's answer token by token."""
+    # Retrieve user-specific memories for personalization if authenticated
+    retrieved_memories: list[str] = []
+    if speaker_id:
+        retrieved_memories = await asyncio.to_thread(
+            memory.retrieve_relevant_memories, speaker_id, corrected_text
+        )
+
     yield PipelineEvent(
         type="meta",
         payload={
@@ -133,7 +141,11 @@ async def _handle_conversation(
 
     def _produce() -> None:
         try:
-            for chunk in llm.stream_answer(corrected_text, language=language):
+            for chunk in llm.stream_answer(
+                corrected_text,
+                language=language,
+                memories=retrieved_memories,
+            ):
                 thread_safe_queue.put(chunk)
         finally:
             thread_safe_queue.put(None)  # sentinel: stream finished
@@ -147,6 +159,14 @@ async def _handle_conversation(
         yield PipelineEvent(type="answer_chunk", payload={"chunk": chunk})
     await producer
 
+    completed_answer = "".join(full_answer)
+
+    # Schedule background memory extraction without delaying the 'done' event
+    if speaker_id and completed_answer.strip():
+        asyncio.create_task(
+            memory.extract_and_save_async(speaker_id, corrected_text, completed_answer)
+        )
+
     yield PipelineEvent(
         type="done",
         payload={
@@ -155,7 +175,7 @@ async def _handle_conversation(
             "speaker_id": speaker_id,
             "command": None,
             "rejected": False,
-            "answer": "".join(full_answer),
+            "answer": completed_answer,
         },
     )
 

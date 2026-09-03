@@ -34,6 +34,15 @@ class CommandDefinition:
     important: bool
 
 
+@dataclass
+class MemoryRecord:
+    id: str
+    username: str
+    content: str
+    category: str = "general"
+    created_at: str = ""
+    updated_at: str = ""
+
 
 @dataclass
 class EmbeddingSample:

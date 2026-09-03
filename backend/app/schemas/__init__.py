@@ -14,6 +14,12 @@ from app.schemas.enrollment import (
     EnrollmentSampleOut,
     EnrollmentStatus,
 )
+from app.schemas.memory import (
+    MemoryIn,
+    MemoryListOut,
+    MemoryOut,
+    MemoryUpdate,
+)
 
 __all__ = [
     "RegisterRequest",
@@ -26,4 +32,8 @@ __all__ = [
     "CommandUpdate",
     "CommandOut",
     "ChatRequest",
+    "MemoryIn",
+    "MemoryUpdate",
+    "MemoryOut",
+    "MemoryListOut",
 ]

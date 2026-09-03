@@ -17,6 +17,7 @@ from app.services.enrollment import (
 )
 from app.services.intent_router import route
 from app.services.llm import answer, stream_answer
+from app.services import memory
 from app.services.pipeline import (
     run_text_pipeline,
     run_voice_pipeline,
@@ -51,6 +52,7 @@ __all__ = [
     "correct_text",
     "stream_answer",
     "answer",
+    "memory",
     "sse_frame",
     "stream_pipeline_events",
     "run_voice_pipeline",
