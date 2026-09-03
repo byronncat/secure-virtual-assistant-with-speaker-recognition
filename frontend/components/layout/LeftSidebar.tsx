@@ -9,7 +9,7 @@ import {
   Settings,
 } from "lucide-react";
 import { useCallback, useEffect, useState } from "react";
-import CommandItem from "../CommandItem";
+import CommandItem from "../commands/CommandItem";
 import clsx from "clsx";
 import { useAuth } from "@/lib/auth-context";
 import SettingsModal from "../SettingsModel";

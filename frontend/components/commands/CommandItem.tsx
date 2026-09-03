@@ -1,4 +1,4 @@
-import type { VoiceCommand } from "./types";
+import type { VoiceCommand } from "../types";
 import clsx from "clsx";
 import { getLucideIcon } from "@/lib/icons";
 

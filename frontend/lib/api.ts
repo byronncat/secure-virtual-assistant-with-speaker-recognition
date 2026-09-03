@@ -98,6 +98,8 @@ export interface EnrollmentStatus {
 export interface CommandDefinition {
   id: string;
   intent: string;
+  label: string;
+  icon: string;
   description: string;
   important: boolean;
 }
@@ -190,19 +192,26 @@ export function fetchCommands(): Promise<CommandDefinition[]> {
 
 export function createCommand(
   intent: string,
+  label: string,
+  icon: string,
   description: string,
   important: boolean,
 ): Promise<CommandDefinition> {
   return json<CommandDefinition>("/api/commands", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ intent, description, important }),
+    body: JSON.stringify({ intent, label, icon, description, important }),
   });
 }
 
 export function updateCommand(
   intent: string,
-  patch: { description?: string; important?: boolean },
+  patch: {
+    label?: string;
+    icon?: string;
+    description?: string;
+    important?: boolean;
+  },
 ): Promise<CommandDefinition> {
   return json<CommandDefinition>(
     `/api/commands/${encodeURIComponent(intent)}`,

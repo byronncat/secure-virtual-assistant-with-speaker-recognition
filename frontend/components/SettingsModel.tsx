@@ -4,7 +4,7 @@ import { useState } from "react";
 import clsx from "clsx";
 import { X } from "lucide-react";
 import EnrollmentPanel from "./EnrollmentPanel";
-import CommandManager from "./CommandManager";
+import CommandManager from "./commands/CommandManager";
 
 type Tab = "enrollment" | "commands";
 

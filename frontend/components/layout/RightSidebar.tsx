@@ -2,7 +2,7 @@
 
 import { useEffect, useRef, useState, type FormEvent } from "react";
 import clsx from "clsx";
-import { AlertTriangle, Send } from "lucide-react";
+import { AlertTriangle, Undo2 } from "lucide-react";
 import { sendChatMessage, ApiError, type PipelineResult } from "@/lib/api";
 
 interface ChatMessage {
@@ -96,13 +96,23 @@ export default function RightSidebar() {
           "rounded-xl border border-white/12 bg-card",
         )}
       >
-        <div className="flex items-center justify-between border-b border-white/12 px-4 py-3">
+        <div
+          className={clsx(
+            "flex items-center justify-between",
+            "border-b border-white/12 px-4 py-3",
+          )}
+        >
           <span className="text-[16px] font-medium text-primary">Chat</span>
           <select
             aria-label="Response language"
             value={language}
             onChange={(e) => setLanguage(e.target.value)}
-            className="rounded-lg border border-white/12 bg-background px-2 py-1 text-[13px] text-normal outline-none"
+            className={clsx(
+              "rounded-lg border border-white/12",
+              "bg-background px-2 py-1",
+              "text-[13px] text-normal",
+              "outline-none cursor-pointer focus:border-primary",
+            )}
           >
             {LANGUAGE_OPTIONS.map((opt) => (
               <option key={opt.code} value={opt.code}>
@@ -154,10 +164,11 @@ export default function RightSidebar() {
             disabled={isStreaming || !input.trim()}
             className={clsx(
               "flex size-9 items-center justify-center rounded-lg bg-primary text-background",
-              "transition-opacity hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-50",
+              "transition-opacity cursor-pointer",
+              "hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-50",
             )}
           >
-            <Send size={16} strokeWidth={1.75} />
+            <Undo2 size={16} strokeWidth={1.75} />
           </button>
         </form>
       </div>
