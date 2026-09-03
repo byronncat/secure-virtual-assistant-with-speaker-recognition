@@ -77,7 +77,22 @@ evaluation:
   val_list: "./data/manifests/val.csv"                                              # Used ONLY to auto-derive the open-set rejection threshold
   identification_test_list: "./data/manifests/open_set_identification_trials.csv"   # KNOWN + UNKNOWN open-set SID queries
   top_k: [1, 5]                                                                     # Top-k values for evaluation
-  threshold: null                                                                   # Open-set rejection threshold. If null, it is computed
-                                                                                    # automatically from val_list (minDCF-optimal) and then
-                                                                                    # fixed for identification_test_list. NEVER derived from
-                                                                                    # identification_test_list itself.
+  threshold: null                                                                   # Manual override: fixes a SINGLE threshold and disables the
+                                                                                    # sweep below entirely. Leave null for normal use.
+  results_csv: "./logs/eval/open_set_threshold_table.csv"                          # Where the per-threshold metrics table is saved
+
+  # If null (threshold: null above), the "recommended" threshold is always
+  # auto-derived from val_list (minDCF-optimal, using dcf_p_target/c_miss/c_fa
+  # below) -- NEVER from identification_test_list. threshold_sweep controls
+  # whether evaluate.py additionally reports that same metrics table across a
+  # RANGE of thresholds (so you can see the GAR/FAR tradeoff around the
+  # recommended point), instead of only the single recommended row.
+  threshold_sweep:
+    enabled: true                 # false = old behavior, single-row table at the auto threshold
+    values: [0.40, 0.42, 0.44, 0.45, 0.46, 0.47, 0.48, 0.49, 0.50, 0.51, 0.52, 0.53, 0.54, 0.55, 0.56, 0.57, 0.58, 0.59, 0.60, 0.61, 0.62, 0.63, 0.64, 0.65, 0.67, 0.70]                  # explicit list of thresholds to test, e.g. [0.15, 0.20, 0.25].
+                                   # If set, this is used verbatim and num_thresholds/percentile_range below are ignored.
+    num_thresholds: 15            # size of the auto-generated grid (only used when values is null)
+    percentile_range: [1, 99]     # grid spans this percentile range of the val_list genuine+impostor
+                                   # score distribution -- grounded in val_list, never in the test set
+    include_auto_threshold: true  # always fold the minDCF-optimal threshold into the grid, flagged
+                                   # as "recommended_auto_threshold" in the output table

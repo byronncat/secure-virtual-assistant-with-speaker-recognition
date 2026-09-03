@@ -37,12 +37,15 @@ Usage:
 
 import argparse
 import logging
+import os
 
+import numpy as np
 import pandas as pd
 import torch
 import torch.nn.functional as F
 import yaml
 from torch.utils.tensorboard import SummaryWriter
+from tqdm.auto import tqdm
 
 from dataset import SpeakerDataset
 from metrics import compute_eer, compute_min_dcf
@@ -109,10 +112,8 @@ def evaluate_verification(encoder, feature_dataset, trial_list, device, evaluati
     encoder.eval()
     paths = pd.concat([trials["enrollment_path"], trials["test_path"]]).unique()
     with torch.no_grad():
-        for index, path in enumerate(paths, start=1):
+        for path in tqdm(paths, desc="Embedding progress", unit="files"):
             embeddings[path] = embed_path(encoder, feature_dataset, path, device)
-            if index % 100 == 0 or index == len(paths):
-                LOGGER.info("Embedding progress | %d/%d files", index, len(paths))
 
     scores = [
         float((embeddings[row.enrollment_path] * embeddings[row.test_path]).sum())
@@ -163,7 +164,12 @@ def build_speaker_centroids(encoder, feature_dataset, enrollment_list, device):
     encoder.eval()
     centroids = {}
     with torch.no_grad():
-        for speaker_id, group in enrollment.groupby("speaker_id"):
+        for speaker_id, group in tqdm(
+            enrollment.groupby("speaker_id"),
+            total=enrollment["speaker_id"].nunique(),
+            desc="Centroids progress",
+            unit="speakers",
+        ):
             embeds = [
                 embed_path(encoder, feature_dataset, path, device)
                 for path in group["file_path"]
@@ -173,20 +179,19 @@ def build_speaker_centroids(encoder, feature_dataset, enrollment_list, device):
     return centroids
 
 
-def determine_open_set_threshold(
-    encoder, feature_dataset, val_list, centroids, device, dcf_cfg
-):
-    """Automatically determine the open-set identification rejection
-    threshold from val.csv ONLY -- never from open_set_identification_trials.csv.
+def score_val_trials(encoder, feature_dataset, val_list, centroids, device):
+    """Score every val.csv utterance against every enrolled-speaker centroid.
 
     val.csv utterances belong to the same speakers as the enrollment set
     (train.csv, speaker-closed split). For every val.csv utterance we score
     it against every enrolled speaker's centroid: the score against its own
     true speaker forms a genuine trial, and the scores against every other
-    enrolled speaker form impostor trials. The minDCF-optimal threshold over
-    these genuine/impostor scores (using the same dcf_p_target/c_miss/c_fa
-    cost weights as verification) is fixed and returned; the caller reuses
-    it unchanged on open_set_identification_trials.csv.
+    enrolled speaker form impostor trials.
+
+    This is the ONE piece of information ever taken from val.csv. Both the
+    single auto-derived (minDCF) threshold and the multi-threshold sweep grid
+    are built from this same (labels, scores) pair -- open_set_identification
+    _trials.csv is never touched by any of this.
     """
     speaker_ids = list(centroids.keys())
     centroid_matrix = torch.cat([centroids[sid] for sid in speaker_ids], dim=0)
@@ -199,8 +204,7 @@ def determine_open_set_threshold(
         raise ValueError(f"val_list is empty: {val_list}")
 
     LOGGER.info(
-        "Determining open-set threshold from val_list | val_utterances=%d | "
-        "enrolled_speakers=%d",
+        "Scoring val_list trials | val_utterances=%d | enrolled_speakers=%d",
         len(val_queries),
         len(speaker_ids),
     )
@@ -208,7 +212,12 @@ def determine_open_set_threshold(
     labels, scores = [], []
     encoder.eval()
     with torch.no_grad():
-        for index, row in enumerate(val_queries.itertuples(index=False), start=1):
+        for row in tqdm(
+            val_queries.itertuples(index=False),
+            total=len(val_queries),
+            desc="Val scoring progress",
+            unit="files",
+        ):
             if row.speaker_id not in centroids:
                 # Should not happen given the speaker-closed train/val split.
                 continue
@@ -217,13 +226,16 @@ def determine_open_set_threshold(
             for sid, sim in zip(speaker_ids, sims):
                 labels.append(1 if sid == row.speaker_id else 0)
                 scores.append(sim)
-            if index % 100 == 0 or index == len(val_queries):
-                LOGGER.info(
-                    "Threshold-search progress | %d/%d val utterances",
-                    index,
-                    len(val_queries),
-                )
+    return labels, scores
 
+
+def select_mindcf_threshold(labels, scores, dcf_cfg):
+    """The single "recommended" operating point: minDCF-optimal threshold
+    over the val_list genuine/impostor scores, using the same
+    dcf_p_target/c_miss/c_fa cost weights as verification. For a secure
+    voice assistant, c_fa should be set well above c_miss so this threshold
+    is biased toward rejecting strangers over inconveniencing genuine users.
+    """
     _, _, dcf_threshold = compute_min_dcf(
         labels,
         scores,
@@ -232,43 +244,61 @@ def determine_open_set_threshold(
         c_fa=dcf_cfg["dcf_c_fa"],
     )
     LOGGER.info(
-        "Open-set identification threshold fixed from val_list: %.6f", dcf_threshold
+        "Open-set identification threshold (minDCF-optimal, auto from val_list): %.6f",
+        dcf_threshold,
     )
     return dcf_threshold
 
 
-def evaluate_identification(
-    encoder,
-    feature_dataset,
-    centroids,
-    identification_test_list,
-    device,
-    top_k=(1, 5),
-    reject_threshold=None,
-):
-    """Open-set speaker identification evaluation.
+def build_threshold_grid(scores, sweep_cfg, auto_threshold):
+    """Build the list of thresholds to evaluate on identification_test_list,
+    grounded ONLY in val_list's own score distribution -- never in the test
+    list itself.
 
-    Every query in `identification_test_list` is compared against all
-    enrolled speaker centroids (from `centroids`, built from train.csv). If
-    the best similarity score clears `reject_threshold`, the query is
-    accepted and assigned to its best-matching enrolled speaker (top-k
-    accuracy is then computed among accepted, genuinely-enrolled queries);
-    otherwise it is rejected, i.e. predicted UNKNOWN. The trial list mixes:
-      * KNOWN queries   -> speaker_id IS in the enrollment set (genuine)
-      * UNKNOWN queries -> speaker_id is NOT in the enrollment set (impostor)
-    This mirrors how the assistant should behave at runtime: identify for
-    personalization, but fall back to a generic/guest profile when the match
-    isn't confident enough, and never rely on this weaker threshold to
-    authorize sensitive actions (that's what verification's minDCF
-    threshold is for).
+    - If sweep_cfg["values"] is a non-empty list, those exact thresholds are
+      used (e.g. a set of candidate operating points picked by hand).
+    - Otherwise, `num_thresholds` values are spaced evenly between the
+      `percentile_range` percentiles of the val_list genuine+impostor score
+      distribution, so the grid automatically covers the range where the
+      scores actually live instead of arbitrary hardcoded numbers.
+
+    The minDCF-optimal `auto_threshold` is always folded into the grid (and
+    flagged as the recommended row in the resulting table), even if it
+    doesn't land exactly on a generated grid point.
     """
-    if reject_threshold is None:
-        raise ValueError(
-            "evaluate_identification requires a reject_threshold for open-set "
-            "evaluation (set evaluation.threshold in the config, or let it be "
-            "auto-derived from val_list)."
-        )
+    explicit_values = sweep_cfg.get("values")
+    if explicit_values:
+        grid = sorted({round(float(v), 6) for v in explicit_values})
+    else:
+        num_thresholds = int(sweep_cfg.get("num_thresholds", 15))
+        low_pct, high_pct = sweep_cfg.get("percentile_range", [1, 99])
+        scores_arr = np.asarray(scores, dtype=float)
+        low = np.percentile(scores_arr, low_pct)
+        high = np.percentile(scores_arr, high_pct)
+        grid = sorted({round(v, 6) for v in np.linspace(low, high, num_thresholds)})
 
+    if sweep_cfg.get("include_auto_threshold", True):
+        auto_rounded = round(float(auto_threshold), 6)
+        if auto_rounded not in grid:
+            grid.append(auto_rounded)
+            grid.sort()
+    return grid
+
+
+def score_identification_queries(
+    encoder, feature_dataset, centroids, identification_test_list, device, max_k
+):
+    """Embed every identification_test_list query exactly once and record,
+    per query, everything a threshold decision needs: whether it's genuine
+    (KNOWN, speaker IS enrolled) or impostor (UNKNOWN, speaker is NOT
+    enrolled), its best similarity score against any enrolled centroid, and
+    its top-max_k ranked enrolled speakers.
+
+    Scoring/ranking is threshold-independent, so this expensive embedding
+    pass runs once regardless of how many thresholds are later evaluated --
+    compute_identification_metrics() below just does cheap bookkeeping over
+    these precomputed records for each threshold.
+    """
     speaker_ids = list(centroids.keys())
     enrolled_set = set(speaker_ids)
     centroid_matrix = torch.cat([centroids[sid] for sid in speaker_ids], dim=0)
@@ -284,27 +314,20 @@ def evaluate_identification(
             f"Identification test list is empty: {identification_test_list}"
         )
 
-    max_k = max(top_k)
     LOGGER.info(
-        "Running open-set identification | test_utterances=%d | "
-        "enrolled_speakers=%d | reject_threshold=%.6f",
+        "Embedding identification queries | test_utterances=%d | enrolled_speakers=%d",
         len(identification_queries),
         len(speaker_ids),
-        reject_threshold,
     )
 
-    correct_at_k = {k: 0 for k in top_k}
-    genuine_total = 0
-    genuine_accepted = 0
-    impostor_total = 0
-    impostor_accepted = (
-        0  # false accepts: UNKNOWN voice wrongly matched to an enrolled speaker
-    )
-
+    records = []
     encoder.eval()
     with torch.no_grad():
-        for index, row in enumerate(
-            identification_queries.itertuples(index=False), start=1
+        for row in tqdm(
+            identification_queries.itertuples(index=False),
+            total=len(identification_queries),
+            desc="Identification embedding progress",
+            unit="files",
         ):
             is_genuine = row.speaker_id in enrolled_set  # KNOWN vs UNKNOWN
             embedding = embed_path(encoder, feature_dataset, row.file_path, device)
@@ -312,36 +335,53 @@ def evaluate_identification(
             top_indices = torch.topk(
                 scores, k=min(max_k, len(speaker_ids))
             ).indices.tolist()
-            ranked = [speaker_ids[i] for i in top_indices]
-            best_score = scores[top_indices[0]].item()
-            accepted = best_score >= reject_threshold
+            records.append(
+                {
+                    "is_genuine": is_genuine,
+                    "true_speaker": row.speaker_id,
+                    "ranked": [speaker_ids[i] for i in top_indices],
+                    "best_score": scores[top_indices[0]].item(),
+                }
+            )
+    return records
 
-            if is_genuine:
-                genuine_total += 1
-                if accepted:
-                    genuine_accepted += 1
-                    for k in top_k:
-                        if row.speaker_id in ranked[:k]:
-                            correct_at_k[k] += 1
-                # rejected genuine (KNOWN) trials count as false rejects below.
-            else:
-                impostor_total += 1
-                if accepted:
-                    impostor_accepted += 1
 
-            if index % 100 == 0 or index == len(identification_queries):
-                LOGGER.info(
-                    "Identification progress | %d/%d files",
-                    index,
-                    len(identification_queries),
-                )
+def compute_identification_metrics(records, reject_threshold, top_k):
+    """One row of the open-set identification table, for a single
+    `reject_threshold`, computed from precomputed per-query `records` (see
+    score_identification_queries). A query is accepted, and assigned to its
+    best-matching enrolled speaker, only if its best similarity score clears
+    `reject_threshold`; otherwise it is rejected, i.e. predicted UNKNOWN.
+    """
+    correct_at_k = {k: 0 for k in top_k}
+    genuine_total = genuine_accepted = 0
+    impostor_total = impostor_accepted = 0
+
+    for rec in records:
+        accepted = rec["best_score"] >= reject_threshold
+        if rec["is_genuine"]:
+            genuine_total += 1
+            if accepted:
+                genuine_accepted += 1
+                for k in top_k:
+                    if rec["true_speaker"] in rec["ranked"][:k]:
+                        correct_at_k[k] += 1
+            # rejected genuine (KNOWN) trials count as false rejects below.
+        else:
+            impostor_total += 1
+            if accepted:
+                # false accept: UNKNOWN voice wrongly matched to an enrolled speaker
+                impostor_accepted += 1
 
     results = {
-        f"top{k}_accuracy_given_accept": (
+        "threshold": reject_threshold,
+        "num_known_queries": genuine_total,
+        "num_unknown_queries": impostor_total,
+    }
+    for k in top_k:
+        results[f"top{k}_accuracy_given_accept"] = (
             correct_at_k[k] / genuine_accepted if genuine_accepted else 0.0
         )
-        for k in top_k
-    }
     results["genuine_acceptance_rate"] = (
         genuine_accepted / genuine_total if genuine_total else 0.0
     )
@@ -351,11 +391,46 @@ def evaluate_identification(
         results["impostor_correct_rejection_rate"] = (
             1.0 - results["impostor_false_accept_rate"]
         )
+    else:
+        results["impostor_false_accept_rate"] = 0.0
+        results["impostor_correct_rejection_rate"] = 0.0
     # Overall open-set accuracy: genuine (KNOWN) correctly accepted AND top-1 correct.
     results["overall_top1_accuracy"] = (
         correct_at_k[top_k[0]] / genuine_total if genuine_total else 0.0
     )
     return results
+
+
+def evaluate_identification_sweep(records, thresholds, top_k, auto_threshold=None):
+    """Build the full threshold-sweep table: one row per threshold in
+    `thresholds`, each computed cheaply from the already-embedded `records`.
+    The row matching `auto_threshold` (the minDCF-optimal, val_list-derived
+    threshold) is flagged via `recommended_auto_threshold` so it's easy to
+    pick out in the saved table.
+    """
+    rows = []
+    for reject_threshold in thresholds:
+        row = compute_identification_metrics(records, reject_threshold, top_k)
+        # Grid thresholds are rounded to 6 decimals (see build_threshold_grid),
+        # so compare at that same precision rather than exact float equality.
+        row["recommended_auto_threshold"] = (
+            auto_threshold is not None and abs(reject_threshold - auto_threshold) < 1e-6
+        )
+        rows.append(row)
+    columns = (
+        ["threshold", "recommended_auto_threshold"]
+        + [f"top{k}_accuracy_given_accept" for k in top_k]
+        + [
+            "genuine_acceptance_rate",
+            "false_reject_rate",
+            "impostor_false_accept_rate",
+            "impostor_correct_rejection_rate",
+            "overall_top1_accuracy",
+            "num_known_queries",
+            "num_unknown_queries",
+        ]
+    )
+    return pd.DataFrame(rows)[columns]
 
 
 def main():
@@ -490,49 +565,110 @@ def main():
             centroids = build_speaker_centroids(
                 encoder, feature_dataset, evaluation_cfg["enrollment_list"], device
             )
+            top_k = tuple(evaluation_cfg.get("top_k", [1, 5]))
+            max_k = max(top_k)
 
-            reject_threshold = evaluation_cfg.get("threshold")
-            if reject_threshold is None:
-                reject_threshold = determine_open_set_threshold(
+            # The minDCF-optimal ("recommended") threshold and, if enabled, the
+            # sweep grid are BOTH derived only from val_list -- never from
+            # identification_test_list. A manual evaluation.threshold override
+            # (if set) short-circuits all of this into a single-row table.
+            manual_override = evaluation_cfg.get("threshold")
+            sweep_cfg = evaluation_cfg.get("threshold_sweep") or {}
+            if manual_override is not None:
+                LOGGER.info(
+                    "Using evaluation.threshold override for open-set identification "
+                    "(sweep disabled): %.6f",
+                    manual_override,
+                )
+                auto_threshold = None
+                thresholds = [float(manual_override)]
+            else:
+                val_labels, val_scores = score_val_trials(
                     encoder,
                     feature_dataset,
                     evaluation_cfg["val_list"],
                     centroids,
                     device,
-                    evaluation_cfg,
                 )
-            else:
-                LOGGER.info(
-                    "Using evaluation.threshold override for open-set identification: "
-                    "%.6f",
-                    reject_threshold,
+                auto_threshold = select_mindcf_threshold(
+                    val_labels, val_scores, evaluation_cfg
                 )
+                if sweep_cfg.get("enabled", False):
+                    thresholds = build_threshold_grid(
+                        val_scores, sweep_cfg, auto_threshold
+                    )
+                    LOGGER.info(
+                        "Threshold sweep enabled | %d threshold(s) to evaluate: %s",
+                        len(thresholds),
+                        thresholds,
+                    )
+                else:
+                    thresholds = [auto_threshold]
 
             LOGGER.info(
                 "Identification started | enrollment_list=%s | "
-                "identification_test_list=%s | mode=open-set",
+                "identification_test_list=%s | mode=open-set | thresholds=%d",
                 evaluation_cfg["enrollment_list"],
                 evaluation_cfg["identification_test_list"],
+                len(thresholds),
             )
-            top_k = tuple(evaluation_cfg.get("top_k", [1, 5]))
-            sid_results = evaluate_identification(
+            records = score_identification_queries(
                 encoder,
                 feature_dataset,
                 centroids,
                 evaluation_cfg["identification_test_list"],
                 device,
-                top_k=top_k,
-                reject_threshold=reject_threshold,
+                max_k,
             )
+            table = evaluate_identification_sweep(
+                records, thresholds, top_k, auto_threshold=auto_threshold
+            )
+
             LOGGER.info(
-                "Identification completed | %s",
-                " | ".join(
-                    f"{name}={value * 100:.2f}%" for name, value in sid_results.items()
-                ),
+                "Identification completed | threshold table (%d row(s)):\n%s",
+                len(table),
+                table.to_string(index=False),
             )
+
+            results_csv = evaluation_cfg.get("results_csv")
+            if results_csv:
+                out_dir = os.path.dirname(results_csv)
+                if out_dir:
+                    os.makedirs(out_dir, exist_ok=True)
+                table.to_csv(results_csv, index=False)
+                LOGGER.info("Threshold table saved to %s", results_csv)
+
             if writer is not None:
-                for name, value in sid_results.items():
-                    writer.add_scalar(f"evaluation/{name}", value, step)
+                writer.add_text(
+                    "evaluation/threshold_table", table.to_string(index=False), step
+                )
+                # Headline scalars (for cross-epoch TensorBoard tracking) come
+                # from the recommended row: the auto/minDCF threshold if one
+                # was computed, otherwise the single manual-override row.
+                recommended_rows = (
+                    table[table["recommended_auto_threshold"]]
+                    if auto_threshold is not None
+                    else table.iloc[0:0]
+                )
+                if not recommended_rows.empty:
+                    recommended = recommended_rows.iloc[0]
+                elif auto_threshold is not None:
+                    # Safety net: e.g. threshold_sweep.values was set explicitly
+                    # and happens not to contain the auto threshold. Fall back
+                    # to whichever grid row is numerically closest to it.
+                    closest_idx = (table["threshold"] - auto_threshold).abs().idxmin()
+                    recommended = table.loc[closest_idx]
+                else:
+                    recommended = table.iloc[0]
+                scalar_names = [f"top{k}_accuracy_given_accept" for k in top_k] + [
+                    "genuine_acceptance_rate",
+                    "false_reject_rate",
+                    "impostor_false_accept_rate",
+                    "impostor_correct_rejection_rate",
+                    "overall_top1_accuracy",
+                ]
+                for name in scalar_names:
+                    writer.add_scalar(f"evaluation/{name}", recommended[name], step)
                 writer.flush()
     else:
         LOGGER.info("Identification evaluation skipped (--skip-identification)")

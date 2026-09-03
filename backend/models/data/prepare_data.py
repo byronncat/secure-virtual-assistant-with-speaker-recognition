@@ -64,10 +64,14 @@ This script:
        - KNOWN queries   = the validation utterances (val.csv), whose speakers
                             are, by construction, also in train.csv/enrollment.
        - UNKNOWN queries = the unique utterances referenced by the Easy/Hard
-                            trial files, whose speakers are, by the dataset's
-                            open-set design, disjoint from the train speakers
-                            (verified via the train/test speaker-overlap check
-                            below) and therefore never in the enrollment set.
+                            trial files, MINUS any utterance whose speaker is
+                            also present in train.csv/enrollment. The dataset
+                            itself does NOT guarantee that Easy/Hard trial
+                            speakers are disjoint from train speakers, so this
+                            filtering is done explicitly in
+                            collect_unknown_queries() (and the number of
+                            excluded speakers/utterances is printed in the
+                            summary) to keep the open-set protocol valid.
   5. Prints complete statistics for direct inclusion in the report
      (Dataset & Splits section).
 
@@ -235,23 +239,36 @@ def write_trials(trials, out_path):
     print(f"[OK] Wrote {len(trials)} trial pairs -> {out_path}")
 
 
-def collect_unknown_queries(trials):
-    """Extract unique (speaker_id, file_path) pairs from SV trial pairs.
+def collect_unknown_queries(trials, train_speakers):
+    """Extract unique (speaker_id, file_path) pairs from SV trial pairs to
+    use as UNKNOWN queries for open-set identification.
 
-    These utterances come from the Easy/Hard trial files, whose speakers are,
-    by the dataset's open-set design, disjoint from the enrolled (train)
-    speakers. They serve as UNKNOWN queries for open-set identification.
+    IMPORTANT: the Easy/Hard trial files are plain speaker-verification
+    trial pairs. The dataset does NOT guarantee that their speakers are
+    disjoint from the training list -- some speakers can legitimately show
+    up in both vietnam-celeb-t.txt and vietnam-celeb-e.txt/-h.txt. Since an
+    UNKNOWN query must never belong to an already-enrolled/train speaker
+    (otherwise the open-set identification protocol is invalid), any
+    utterance whose speaker is present in train_speakers is explicitly
+    excluded here. The excluded speakers/utterances are returned so the
+    caller can report them in the summary instead of silently dropping them.
     """
     seen = set()
     rows = []
+    excluded_speakers = set()
+    excluded_utts = 0
     for path_a, path_b, _ in trials:
         for path in (path_a, path_b):
             if path in seen:
                 continue
             seen.add(path)
             spk = os.path.basename(os.path.dirname(path))
+            if spk in train_speakers:
+                excluded_speakers.add(spk)
+                excluded_utts += 1
+                continue
             rows.append([spk, path, "UNKNOWN"])
-    return rows
+    return rows, excluded_speakers, excluded_utts
 
 
 def write_open_set_identification(rows_val, unknown_rows, out_path):
@@ -386,21 +403,31 @@ def main():
     # Closed-set SV trials (replaces the old test_trials.csv).
     write_trials(trials_all, os.path.join(out_dir, "verification_trials.csv"))
 
+    # train_speakers must be known BEFORE building UNKNOWN queries, since any
+    # Easy/Hard-trial speaker that also appears in train has to be excluded
+    # (see collect_unknown_queries) to keep the open-set design valid.
+    train_speakers = set(e[0] for e in train_entries)
+
     # Open-set SID trials: KNOWN queries are the validation utterances
     # (same speakers as train.csv/enrollment); UNKNOWN queries are the
-    # test-set utterances referenced by the Easy/Hard trial files, whose
-    # speakers are disjoint from train by the dataset's open-set design.
-    unknown_rows = collect_unknown_queries(trials_all)
+    # test-set utterances referenced by the Easy/Hard trial files, with any
+    # speaker that overlaps train explicitly filtered out.
+    unknown_rows, excluded_speakers, excluded_utts = collect_unknown_queries(
+        trials_all, train_speakers
+    )
     write_open_set_identification(
         rows_val,
         unknown_rows,
         os.path.join(out_dir, "open_set_identification_trials.csv"),
     )
 
-    # List speakers appearing in the test set to check the open-set split.
+    # Verify the open-set split is now strictly speaker-disjoint.
     test_speakers = set(row[0] for row in unknown_rows)
-    train_speakers = set(e[0] for e in train_entries)
     overlap = train_speakers & test_speakers
+    assert not overlap, (
+        f"Open-set design still violated: {len(overlap)} speakers overlap "
+        f"between train and test after filtering -- this should not happen."
+    )
 
     meta = load_speaker_metadata(args.speaker_meta)
 
@@ -418,6 +445,13 @@ def main():
         f"Speakers overlapping between train and test: {len(overlap)} "
         f"(must be = 0 for the correct open-set design)"
     )
+    if excluded_speakers:
+        print(
+            f"  [NOTE] {len(excluded_speakers)} speakers "
+            f"({excluded_utts} utterances) referenced in the Easy/Hard "
+            f"trial files also appear in train.csv and were EXCLUDED from "
+            f"UNKNOWN queries to keep the open-set design valid."
+        )
     print(
         f"SID enrollment (train.csv)      : {len(rows_train):6d} utterances | "
         f"{n_spk_train:4d} registered speakers"
