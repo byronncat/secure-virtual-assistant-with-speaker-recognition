@@ -197,7 +197,7 @@ Evaluated across **9,156 test queries** (5,715 enrolled genuine queries + 3,441 
 | **Overall Top-1 Accuracy**                      |   `0.813648`   | **81.36%** across all genuine queries |
 
 > [!NOTE]
-> The auto-calibrated threshold $\theta = 0.62077$ corresponds almost exactly to the empirical FRR/IFAR crossover point ($\theta \approx 0.62$), providing a mathematically balanced default between security and accessibility. For higher-risk physical actions, the threshold can be elevated to $0.65$–$0.67$ to constrain impostor acceptance below $10\%$.
+> The auto-calibrated threshold $\theta = 0.62077$ corresponds almost exactly to the empirical FRR/IFAR crossover point ($\theta \approx 0.62$), providing a mathematically balanced default between security and accessibility. For higher-risk physical actions, the threshold can be elevated to $0.65–0.67$ to constrain impostor acceptance below $10\%$.
 
 <p align="right">(<a href="#readme-top">back to top</a>)</p>
 
