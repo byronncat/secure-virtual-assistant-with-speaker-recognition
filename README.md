@@ -13,6 +13,8 @@
     A secure, voice-first intelligent assistant integrating deep-learning acoustic biometrics (ECAPA-TDNN), bilingual speech-to-text (Whisper), generative dialogue (Ollama Llama 3.1), autonomous long-term memory, and biometric command gating.
     <br />
     <br />
+    <a href="https://youtu.be/vNMHC0_HRJs">Demo</a>
+    ·
     <a href="https://github.com/byronncat/secure-virtual-assistant-with-speaker-recognition/issues">Report Bug</a>
     ·
     <a href="https://github.com/byronncat/secure-virtual-assistant-with-speaker-recognition/issues">Request Feature</a>
